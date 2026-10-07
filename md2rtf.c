@@ -1,18 +1,19 @@
 /*
- * md2rtf.c — Convertitore Markdown → RTF per macOS
+ * md2rtf.c — Markdown → RTF converter for macOS
  *
- * Uso:  md2rtf input.md [output.rtf]
- *       (senza output.rtf stampa su stdout)
+ * Usage: md2rtf input.md
+ *        Output is written to the same directory as the input file,
+ *        with the .md extension replaced by .rtf.
  *
- * Elementi supportati:
- *   blocchi : titoli ATX (#…######), titoli setext (=== / ---),
- *             paragrafi, blocchi di codice (``` / ~~~ / 4 spazi / tab),
- *             citazioni (>), linee orizzontali, liste puntate e numerate,
- *             tabelle GFM
- *   inline  : grassetto (** e __), corsivo (* e _),
- *             grassetto+corsivo (***), barrato (~~),
- *             codice inline (`/``), link ([testo](url)),
- *             immagini (![alt](url)), escape (\)
+ * Supported elements:
+ *   block  : ATX headings (#…######), setext headings (=== / ---),
+ *             paragraphs, fenced code blocks (``` / ~~~ / 4 spaces / tab),
+ *             blockquotes (>), horizontal rules, unordered and ordered lists,
+ *             GFM tables
+ *   inline : bold (** and __), italic (* and _),
+ *             bold+italic (***), strikethrough (~~),
+ *             inline code (`/``), links ([label](url)),
+ *             images (![alt](url)), backslash escape (\)
  */
 
 #include <stdio.h>
@@ -21,7 +22,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 
-/* ── Buffer dinamico ─────────────────────────────────────────────────────── */
+/* ── Dynamic buffer ──────────────────────────────────────────────────────── */
 typedef struct { char *d; size_t len, cap; } Buf;
 
 static void buf_init(Buf *b) {
@@ -59,7 +60,7 @@ static void bF(Buf *b, const char *fmt, ...) {
     bS(b, t);
 }
 
-/* ── Escape caratteri speciali RTF (con decodifica UTF-8 → \uNNNN?) ──────── */
+/* ── Escape special RTF characters (with UTF-8 → \uNNNN? decoding) ──────── */
 static void rtfEsc(Buf *b, const char *s, size_t n) {
     size_t i = 0;
     while (i < n) {
@@ -69,7 +70,7 @@ static void rtfEsc(Buf *b, const char *s, size_t n) {
         else if (c == '}') { bS(b, "\\}"); i++; }
         else if (c < 0x80) { bC(b, (char)c); i++; }
         else {
-            /* decodifica sequenza UTF-8 → code point Unicode */
+            /* decode UTF-8 sequence → Unicode code point */
             unsigned long cp = 0;
             int bytes = 0;
             if      ((c & 0xE0) == 0xC0) { cp = c & 0x1F; bytes = 2; }
@@ -84,13 +85,13 @@ static void rtfEsc(Buf *b, const char *s, size_t n) {
                     cp = (cp << 6) | ((unsigned char)s[i+j] & 0x3F);
                 }
                 if (ok) {
-                    /* RTF \u usa interi signed a 16 bit (BMP) */
+                    /* RTF \u uses signed 16-bit integers (BMP) */
                     if (cp <= 32767) {
                         bF(b, "\\u%lu?", cp);
                     } else if (cp <= 65535) {
                         bF(b, "\\u%ld?", (long)cp - 65536L);
                     } else {
-                        /* Supplementary: surrogate pairs per RTF */
+                        /* Supplementary plane: encode as surrogate pair for RTF */
                         unsigned long hi = 0xD800 + ((cp - 0x10000UL) >> 10);
                         unsigned long lo = 0xDC00 + ((cp - 0x10000UL) & 0x3FF);
                         bF(b, "\\u%ld?\\u%ld?",
@@ -100,21 +101,21 @@ static void rtfEsc(Buf *b, const char *s, size_t n) {
                     continue;
                 }
             }
-            /* byte invalido: emetti come escape numerico */
+            /* invalid byte: emit as numeric escape */
             bF(b, "\\u%d?", (int)(signed char)c);
             i++;
         }
     }
 }
 
-/* ── Markdown inline → RTF (dichiarazione anticipata) ───────────────────── */
+/* ── Inline Markdown → RTF (forward declaration) ────────────────────────── */
 static void inlineMD(Buf *b, const char *s, size_t len);
 
 static void inlineMD(Buf *b, const char *s, size_t len) {
     size_t i = 0;
     while (i < len) {
 
-        /* *** grassetto + corsivo *** */
+        /* *** bold + italic *** */
         if (i + 2 < len &&
             ((s[i]=='*' && s[i+1]=='*' && s[i+2]=='*') ||
              (s[i]=='_' && s[i+1]=='_' && s[i+2]=='_'))) {
@@ -130,7 +131,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             }
         }
 
-        /* ** grassetto ** */
+        /* ** bold ** */
         if (i + 1 < len &&
             ((s[i]=='*' && s[i+1]=='*') ||
              (s[i]=='_' && s[i+1]=='_'))) {
@@ -145,7 +146,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             }
         }
 
-        /* * corsivo * — salta ** interni */
+        /* * italic * — skip internal ** pairs */
         if (s[i] == '*' && (i+1 >= len || s[i+1] != '*')) {
             size_t j = i + 1;
             while (j < len) {
@@ -161,7 +162,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             }
         }
 
-        /* _ corsivo _ (non dentro parole) */
+        /* _ italic _ (not inside words) */
         if (s[i] == '_' &&
             (i == 0 || !isalnum((unsigned char)s[i-1])) &&
             (i+1 >= len || s[i+1] != '_')) {
@@ -177,7 +178,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             }
         }
 
-        /* ~~ barrato ~~ */
+        /* ~~ strikethrough ~~ */
         if (i + 1 < len && s[i]=='~' && s[i+1]=='~') {
             size_t j = i + 2;
             while (j + 1 < len && !(s[j]=='~' && s[j+1]=='~')) j++;
@@ -189,7 +190,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             }
         }
 
-        /* ` o `` codice inline ` / `` */
+        /* ` or `` inline code ` / `` */
         if (s[i] == '`') {
             int ticks = (i+1 < len && s[i+1]=='`') ? 2 : 1;
             size_t j = i + ticks;
@@ -210,7 +211,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             }
         }
 
-        /* ![alt](url) immagine — mostra testo alternativo */
+        /* ![alt](url) image — render alt text in italics */
         if (s[i]=='!' && i+1<len && s[i+1]=='[') {
             size_t j = i + 2;
             while (j < len && s[j] != ']') j++;
@@ -218,7 +219,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
                 size_t k = j + 2;
                 while (k < len && s[k] != ')') k++;
                 if (k < len) {
-                    bS(b, "{\\i [Immagine: ");
+                    bS(b, "{\\i [Image: ");
                     rtfEsc(b, s+i+2, j-i-2);
                     bS(b, "]}");
                     i = k + 1; continue;
@@ -226,7 +227,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             }
         }
 
-        /* [testo](url) collegamento */
+        /* [label](url) hyperlink */
         if (s[i] == '[') {
             size_t j = i + 1;
             while (j < len && s[j] != ']') j++;
@@ -242,9 +243,8 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             }
         }
 
-        /* \ escape markdown */
+        /* \ backslash escape — forward the full UTF-8 character that follows */
         if (s[i]=='\\' && i+1 < len) {
-            /* passa l'intero carattere UTF-8 seguente */
             unsigned char nc = (unsigned char)s[i+1];
             int nb = 1;
             if      ((nc & 0xE0)==0xC0) nb=2;
@@ -255,7 +255,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
             i += 1 + nb; continue;
         }
 
-        /* carattere normale (ASCII o inizio sequenza UTF-8) */
+        /* plain character (ASCII or start of a UTF-8 multi-byte sequence) */
         {
             unsigned char c0 = (unsigned char)s[i];
             int nb = 1;
@@ -269,7 +269,7 @@ static void inlineMD(Buf *b, const char *s, size_t len) {
     }
 }
 
-/* ── Funzioni di supporto ────────────────────────────────────────────────── */
+/* ── Helper functions ────────────────────────────────────────────────────── */
 static int isBlank(const char *s) {
     while (*s)
         if (!isspace((unsigned char)*s++)) return 0;
@@ -288,14 +288,14 @@ static int isHR(const char *s, int n) {
     return cnt >= 3;
 }
 
-/* Controlla se tutti i caratteri della stringa sono uguali a ch */
+/* Returns 1 if every character in the string equals ch */
 static int allChar(const char *s, int n, char ch) {
     for (int i = 0; i < n; i++)
         if (s[i] != ch) return 0;
     return n > 0;
 }
 
-/* Ritorna 1 se la riga è un separatore di tabella (|---|---:|:---:|) */
+/* Returns 1 if the line is a GFM table separator row (|---|---:|:---:|) */
 static int isTableSep(const char *s, int n) {
     int hasDash = 0;
     for (int i = 0; i < n; i++) {
@@ -307,33 +307,33 @@ static int isTableSep(const char *s, int n) {
     return hasDash;
 }
 
-/* ── Preambolo RTF ───────────────────────────────────────────────────────── */
+/* ── RTF preamble ────────────────────────────────────────────────────────── */
 static const char *PREAMBLE =
     "{\\rtf1\\ansi\\ansicpg1252\\deff0\n"
-    /* tabella font */
+    /* font table */
     "{\\fonttbl\n"
     "{\\f0\\froman\\fcharset0 Times New Roman;}\n"
     "{\\f1\\fswiss\\fcharset0 Helvetica;}\n"
     "{\\f2\\fmodern\\fcharset0 Courier New;}\n"
     "}\n"
-    /* tabella colori */
+    /* colour table */
     "{\\colortbl;\n"
-    "\\red0\\green0\\blue0;\n"        /* 1 – nero (testo)       */
-    "\\red80\\green80\\blue80;\n"     /* 2 – grigio (citazioni) */
-    "\\red0\\green0\\blue180;\n"      /* 3 – blu (link)         */
-    "\\red150\\green30\\blue30;\n"    /* 4 – rosso (codice)     */
-    "\\red200\\green200\\blue200;\n"  /* 5 – grigio chiaro (hr) */
+    "\\red0\\green0\\blue0;\n"        /* 1 – black (body text)     */
+    "\\red80\\green80\\blue80;\n"     /* 2 – grey  (blockquotes)   */
+    "\\red0\\green0\\blue180;\n"      /* 3 – blue  (links)         */
+    "\\red150\\green30\\blue30;\n"    /* 4 – red   (code)          */
+    "\\red200\\green200\\blue200;\n"  /* 5 – light grey (hr)       */
     "}\n"
-    /* impostazioni pagina: A4 portrait, margini 2.5 cm */
+    /* page setup: A4 portrait, 2.5 cm margins */
     "\\paperw11907\\paperh16840\n"
     "\\margl1417\\margr1417\\margt1134\\margb1134\n"
     "\\widowctrl\\hyphauto\n"
     "\\f0\\fs24\\cf1\n";
 
 /* ── main ────────────────────────────────────────────────────────────────── */
-/* Costruisce il nome del file RTF dal nome del file MD:
-   sostituisce l'estensione .md (case-insensitive) con .rtf,
-   oppure appende .rtf se l'estensione non è .md */
+/* Derive the RTF output path from the input path:
+   replace the .md extension (case-insensitive) with .rtf,
+   or append .rtf if the extension is not .md */
 static void makeRtfName(const char *src, char *dst, size_t dstsz) {
     size_t len = strlen(src);
     if (len >= 3 &&
@@ -351,11 +351,11 @@ static void makeRtfName(const char *src, char *dst, size_t dstsz) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Uso: %s input.md\n", argv[0]);
+        fprintf(stderr, "Usage: %s input.md\n", argv[0]);
         return 1;
     }
 
-    /* --- lettura file sorgente --- */
+    /* --- read source file --- */
     char outName[4096];
     makeRtfName(argv[1], outName, sizeof outName);
 
@@ -367,10 +367,10 @@ int main(int argc, char *argv[]) {
     char *raw = malloc((size_t)fsz + 2);
     size_t nr  = fread(raw, 1, (size_t)fsz, fin);
     fclose(fin);
-    raw[nr]   = '\n';  /* assicura terminazione */
+    raw[nr]   = '\n';  /* ensure the last line is terminated */
     raw[nr+1] = '\0';
 
-    /* --- suddivisione in righe --- */
+    /* --- split into lines --- */
     int cap = 512, n = 0;
     char **L = malloc((size_t)cap * sizeof *L);
     for (char *p = raw; *p; ) {
@@ -379,7 +379,7 @@ int main(int argc, char *argv[]) {
         if (n == cap) { cap *= 2; L = realloc(L, (size_t)cap * sizeof *L); }
         L[n] = malloc(ll + 1);
         memcpy(L[n], p, ll);
-        /* rimuovi CR (file Windows) */
+        /* strip CR (Windows line endings) */
         if (ll > 0 && L[n][ll-1] == '\r') ll--;
         L[n][ll] = '\0';
         n++;
@@ -387,14 +387,14 @@ int main(int argc, char *argv[]) {
         if (!nl) break;
     }
 
-    /* --- costruzione output RTF --- */
+    /* --- build RTF output --- */
     Buf out;
     buf_init(&out);
     bS(&out, PREAMBLE);
 
-    int inCB   = 0;  /* dentro un blocco di codice */
-    int inPara = 0;  /* dentro un paragrafo aperto */
-    int inList = 0;  /* 1=puntata, 2=numerata      */
+    int inCB   = 0;  /* inside a fenced code block */
+    int inPara = 0;  /* inside an open paragraph   */
+    int inList = 0;  /* 1=unordered, 2=ordered     */
 
 #define CLOSE_PARA \
     do { if (inPara) { bS(&out, "\\par\n"); inPara = 0; } } while(0)
@@ -407,7 +407,7 @@ int main(int argc, char *argv[]) {
         char *ln = L[li];
         int   ll = (int)strlen(ln);
 
-        /* ── blocco di codice (backtick o tilde) ── */
+        /* ── fenced code block (backtick or tilde) ── */
         if (strncmp(ln, "```", 3)==0 || strncmp(ln, "~~~", 3)==0) {
             if (!inCB) {
                 CLOSE_ALL;
@@ -425,10 +425,10 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* ── riga vuota ── */
+        /* ── blank line ── */
         if (isBlank(ln)) { CLOSE_ALL; continue; }
 
-        /* ── linea orizzontale (solo fuori paragrafo) ── */
+        /* ── horizontal rule (only outside a paragraph) ── */
         if (!inPara && isHR(ln, ll)) {
             CLOSE_ALL;
             bS(&out,
@@ -437,7 +437,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* ── titolo ATX (# … ######) ── */
+        /* ── ATX heading (# … ######) ── */
         if (ln[0] == '#') {
             int hl = 0;
             while (hl < ll && ln[hl] == '#') hl++;
@@ -456,11 +456,11 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* ── titolo setext (riga sotto === o ---) ── */
+        /* ── setext heading (underline === or ---) ── */
         if (li+1 < n && !inPara) {
             char *nx  = L[li+1];
             int   nln = (int)strlen(nx);
-            /* rimuovi spazi finali per il confronto */
+            /* strip trailing whitespace before comparison */
             while (nln > 0 && isspace((unsigned char)nx[nln-1])) nln--;
             if (allChar(nx, nln, '=') && nln >= 1) {
                 CLOSE_ALL;
@@ -478,7 +478,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* ── citazione (blockquote) ── */
+        /* ── blockquote ── */
         if (ln[0] == '>') {
             CLOSE_ALL;
             const char *qt = ln + 1;
@@ -491,7 +491,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* ── blocco di codice indentato (4 spazi o tab) ── */
+        /* ── indented code block (4 spaces or tab) ── */
         if (strncmp(ln, "    ", 4)==0 || ln[0]=='\t') {
             CLOSE_ALL;
             const char *ct = (ln[0]=='\t') ? ln+1 : ln+4;
@@ -501,14 +501,14 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* ── tabella GFM ── */
+        /* ── GFM table ── */
         if (ln[0] == '|') {
-            if (isTableSep(ln, ll)) continue;  /* riga separatore */
+            if (isTableSep(ln, ll)) continue;  /* skip separator row */
             CLOSE_ALL;
-            /* conta colonne */
+            /* count columns */
             int nc = 0;
             for (int k = 0; k < ll; k++) if (ln[k]=='|') nc++;
-            if (nc >= 2) nc--;  /* celle = pipe - 1 */
+            if (nc >= 2) nc--;  /* cells = pipes − 1 */
             if (nc < 1)  nc = 1;
             int cw = 9000 / nc;
             bS(&out, "\\trowd\\trgaph108 ");
@@ -519,7 +519,7 @@ int main(int argc, char *argv[]) {
                    "\\clbrdrb\\brdrs\\brdrw10"
                    "\\clbrdrr\\brdrs\\brdrw10"
                    "\\cellx%d ", (k+1)*cw);
-            /* contenuto celle */
+            /* cell contents */
             char *cp = ln + (ln[0]=='|' ? 1 : 0);
             for (int k = 0; k < nc; k++) {
                 char *ep  = strchr(cp, '|');
@@ -535,7 +535,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* ── lista puntata (-, *, +) ── */
+        /* ── unordered list (-, *, +) ── */
         {
             int sp = 0;
             while (sp < ll && ln[sp]==' ') sp++;
@@ -554,7 +554,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* ── lista numerata (1. 2. …) ── */
+        /* ── ordered list (1. 2. …) ── */
         {
             int sp = 0;
             while (sp < ll && ln[sp]==' ') sp++;
@@ -578,9 +578,9 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* ── paragrafo ── */
+        /* ── paragraph ── */
         {
-            /* interruzione di riga forzata: due spazi finali */
+            /* hard line break: two trailing spaces */
             int hard = (ll >= 2 && ln[ll-1]==' ' && ln[ll-2]==' ');
             if (hard) ll -= 2;
 
@@ -589,7 +589,7 @@ int main(int argc, char *argv[]) {
                 bS(&out, "\\pard\\f0\\fs24\\cf1\\sb0\\sa120 ");
                 inPara = 1;
             } else {
-                /* singolo a-capo = spazio in Markdown */
+                /* single newline = space in Markdown */
                 bC(&out, ' ');
             }
             inlineMD(&out, ln, (size_t)ll);
@@ -600,14 +600,14 @@ int main(int argc, char *argv[]) {
     CLOSE_ALL;
     bS(&out, "}\n");
 
-    /* --- scrittura output --- */
+    /* --- write output file --- */
     FILE *fout = fopen(outName, "w");
     if (!fout) { perror(outName); return 1; }
     fwrite(out.d, 1, out.len, fout);
     fclose(fout);
-    fprintf(stderr, "Scritto: %s\n", outName);
+    fprintf(stderr, "Written: %s\n", outName);
 
-    /* --- pulizia memoria --- */
+    /* --- free memory --- */
     free(raw);
     free(out.d);
     for (int i = 0; i < n; i++) free(L[i]);
